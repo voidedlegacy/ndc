@@ -1,0 +1,19 @@
+* ndc
+
+A small Rust CLI that reads a source file and prints lexed tokens using a
+simple delimiter-based lexer.
+
+** Usage
+
+#+begin_src sh
+cargo run -- <path_to_file_to_compile>
+#+end_src
+
+** Notes
+
+- Whitespace delimiters: space, carriage return, newline
+- Token delimiters: space, carriage return, newline, comma, parentheses, colon
+
+** License
+
+See LICENSE.
