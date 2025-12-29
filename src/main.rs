@@ -5,14 +5,18 @@ use std::io::{self, Read, Seek, SeekFrom};
 const WHITESPACE: &[u8] = b" \r\n";
 const DELIMITERS: &[u8] = b" \r\n,():";
 
+type Integer = i64;
+
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ErrorType {
-    None,
+    None = 0,
     Arguments,
     Type,
     Generic,
     Syntax,
     Todo,
+    Max,
 }
 
 struct Error {
@@ -34,6 +38,7 @@ fn print_error(err: &Error) {
         return;
     }
     print!("ERROR: ");
+    debug_assert_eq!(ErrorType::Max as u8, 6);
     match err.kind {
         ErrorType::Todo => print!("TODO (not implemented)"),
         ErrorType::Syntax => print!("Invalid syntax"),
@@ -41,6 +46,7 @@ fn print_error(err: &Error) {
         ErrorType::Arguments => print!("Invalid arguments"),
         ErrorType::Generic => {}
         ErrorType::None => {}
+        ErrorType::Max => print!("Unkown error type..."),
     }
     println!();
     if let Some(msg) = &err.msg {
@@ -112,7 +118,77 @@ fn lex(source: &[u8], start: usize) -> Result<Option<(usize, usize)>, Error> {
     Ok(Some((beg, end)))
 }
 
-fn parse_expr(source: &[u8]) -> Error {
+
+// TODO:
+// 1. API to create new node.
+// 2. API to add node as child.
+#[allow(dead_code)]
+#[derive(Debug)]
+enum NodeType {
+    None,
+    Integer,
+    Program,
+    Max,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+enum NodeValue {
+    None,
+    Integer(Integer),
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+struct Node {
+    kind: NodeType,
+    value: NodeValue,
+    children: Vec<Box<Node>>,
+}
+
+impl Node {
+    fn none() -> Self {
+        Self {
+            kind: NodeType::None,
+            value: NodeValue::None,
+            children: Vec::new(),
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn nonep(node: &Node) -> bool {
+    matches!(node.kind, NodeType::None)
+}
+
+#[allow(dead_code)]
+fn integerp(node: &Node) -> bool {
+    matches!(node.kind, NodeType::Integer)
+}
+
+// TODO:
+// 1. API to create new Binding
+// 2. API to add Binding to new environment
+#[allow(dead_code)]
+#[derive(Debug)]
+struct Binding {
+    id: String,
+    value: Box<Node>,
+    next: Option<Box<Binding>>,
+}
+
+// TOOD: API to create new environment
+#[allow(dead_code)]
+#[derive(Debug)]
+struct Environment {
+    parent: Option<Box<Environment>>,
+    bind: Option<Box<Binding>>,
+}
+
+#[allow(dead_code)]
+fn environment_set() {}
+
+fn parse_expr(source: &[u8], _result: &mut Node) -> Error {
     let mut pos = 0;
     loop {
         match lex(source, pos) {
@@ -140,7 +216,8 @@ fn main() {
 
     let path = &args[1];
     if let Some(contents) = file_contents(path) {
-        let err = parse_expr(&contents);
+        let mut expression = Node::none();
+        let err = parse_expr(&contents, &mut expression);
         print_error(&err);
     }
 }
