@@ -30,6 +30,10 @@ fn file_contents(path: &str) -> Option<Vec<u8>> {
     };
     let size = file_size(&mut file);
     let mut contents = vec![0u8; size + 1];
+    assert!(
+        !contents.is_empty() || size == 0,
+        "Could not allocate buffer for file contents"
+    );
     let mut bytes_read = 0usize;
     while bytes_read < size {
         let bytes_read_this_iteration = match file.read(&mut contents[bytes_read..size]) {
@@ -39,7 +43,9 @@ fn file_contents(path: &str) -> Option<Vec<u8>> {
                 return None;
             }
         };
+
         bytes_read += bytes_read_this_iteration;
+
         if bytes_read_this_iteration == 0 {
             break;
         }
@@ -99,7 +105,6 @@ fn print_error(err: &Error) {
     }
 }
 
-#[allow(dead_code)]
 fn error_create(kind: ErrorType, msg: &str) -> Error {
     Error {
         type_: kind,
@@ -115,25 +120,9 @@ fn error_prep(err: &mut Error, kind: ErrorType, message: &str) {
 const WHITESPACE: &[u8] = b" \r\n";
 const DELIMITERS: &[u8] = b" \r\n,():";
 
-#[derive(Clone, Debug)]
 struct Token {
     beginning: usize,
     end: usize,
-    next: Option<Box<Token>>,
-}
-
-fn token_create() -> Box<Token> {
-    Box::new(Token {
-        beginning: 0,
-        end: 0,
-        next: None,
-    })
-}
-
-fn token_free(mut root: Option<Box<Token>>) {
-    while let Some(mut token_to_free) = root {
-        root = token_to_free.next.take();
-    }
 }
 
 fn print_token(source: &[u8], t: &Token) {
@@ -143,31 +132,16 @@ fn print_token(source: &[u8], t: &Token) {
     print!("{}", String::from_utf8_lossy(&source[t.beginning..t.end]));
 }
 
-fn print_tokens(source: &[u8], mut root: Option<&Token>) {
-    let mut count: usize = 1;
-    while let Some(token) = root {
-        // FIXME: Remove this limit.
-        if count > 10000 {
-            break;
-        }
-        print!("Token {}: ", count);
-        if token.beginning < token.end && token.end <= source.len() {
-            print!(
-                "{}",
-                String::from_utf8_lossy(&source[token.beginning..token.end])
-            );
-        }
-        println!();
-        root = token.next.as_deref();
-        count += 1;
-    }
-}
-
 /// Lex the next token from SOURCE, and point to it with BEG and END.
 fn lex(source: &[u8], start: usize, token: &mut Token) -> Error {
     let mut err = ok();
-    if source.is_empty() || start >= source.len() {
+    if source.is_empty() {
         error_prep(&mut err, ErrorType::ERROR_ARGUMENTS, "Can not lex empty source.");
+        return err;
+    }
+    if start >= source.len() {
+        token.beginning = start;
+        token.end = start;
         return err;
     }
     token.beginning = start;
@@ -203,6 +177,12 @@ fn lex(source: &[u8], start: usize, token: &mut Token) -> Error {
 // `-- 0  ->  1  ->  2
 //     `-- 3  ->  4
 
+// A : integer = 420
+//
+// PROGRAM
+// `-- VARIABLE_DECLARATION_INITIALIZED
+//     `-- INTEGER (420) -> SYMBOL (A)
+
 // TODO:
 // |-- API to create new node.
 // `-- API to add node as child.
@@ -210,21 +190,47 @@ fn lex(source: &[u8], start: usize, token: &mut Token) -> Error {
 type integer_t = i64;
 
 #[allow(non_camel_case_types)]
+#[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NodeType {
+    // BEGIN LITERALS
+
+    /// The definition of nothing; false, etc.
     NODE_TYPE_NONE,
+
+    /// Just an integer.
     NODE_TYPE_INTEGER,
+
+    /// When a literal is expected but no other literal is valid, it
+    /// becomes a symbol.
+    NODE_TYPE_SYMBOL,
+
+    // END LITERALS
+
+    /// Contains two children. The first determines type (and value),
+    /// while the second contains the symbolic name of the variable.
+    NODE_TYPE_VARIABLE_DECLARATION,
+    NODE_TYPE_VARIABLE_DECLARATION_INITIALIZED,
+
+    /// Contains two children that determine left and right acceptable
+    /// types.
+    NODE_TYPE_BINARY_OPERATOR,
+
+    /// Contains a list of expressions to execute in sequence.
     NODE_TYPE_PROGRAM,
+
     NODE_TYPE_MAX,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct NodeValue {
     integer: integer_t,
+    symbol: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 struct Node {
+    // TODO: Think about how to document node types and how they fit in the AST.
     type_: NodeType,
     value: NodeValue,
     // Possible TODO: Parent?
@@ -233,10 +239,13 @@ struct Node {
 }
 
 impl Node {
-    fn none() -> Self {
+    fn zeroed() -> Self {
         Node {
             type_: NodeType::NODE_TYPE_NONE,
-            value: NodeValue { integer: 0 },
+            value: NodeValue {
+                integer: 0,
+                symbol: None,
+            },
             children: None,
             next_child: None,
         }
@@ -251,6 +260,26 @@ fn integerp(node: &Node) -> bool {
     node.type_ == NodeType::NODE_TYPE_INTEGER
 }
 
+fn symbolp(node: &Node) -> bool {
+    node.type_ == NodeType::NODE_TYPE_SYMBOL
+}
+
+fn node_add_child(parent: &mut Node, new_child: &Node) {
+    let allocated_child = Box::new(new_child.clone());
+    let mut cursor = &mut parent.children;
+    loop {
+        match cursor {
+            Some(child) => {
+                cursor = &mut child.next_child;
+            }
+            None => {
+                *cursor = Some(allocated_child);
+                break;
+            }
+        }
+    }
+}
+
 /// @return Boolean-like value; 1 for success, 0 for failure.
 fn node_compare(a: Option<&Node>, b: Option<&Node>) -> i32 {
     if a.is_none() || b.is_none() {
@@ -261,29 +290,31 @@ fn node_compare(a: Option<&Node>, b: Option<&Node>) -> i32 {
     }
     let a = a.unwrap();
     let b = b.unwrap();
-    debug_assert_eq!(NodeType::NODE_TYPE_MAX as i32, 3, "node_compare() must handle all node types");
+    debug_assert_eq!(NodeType::NODE_TYPE_MAX as i32, 7, "node_compare() must handle all node types");
     if a.type_ != b.type_ {
         return 0;
     }
     match a.type_ {
         NodeType::NODE_TYPE_NONE => {
             if nonep(b) {
-                return 1;
+                1
+            } else {
+                0
             }
-            0
         }
         NodeType::NODE_TYPE_INTEGER => {
             if a.value.integer == b.value.integer {
-                return 1;
+                1
+            } else {
+                0
             }
-            0
         }
         NodeType::NODE_TYPE_PROGRAM => {
             // TODO: Compare two programs.
             println!("TODO: Compare two programs.");
             0
         }
-        NodeType::NODE_TYPE_MAX => 0,
+        _ => 0,
     }
 }
 
@@ -298,14 +329,30 @@ fn print_node(node: Option<&Node>, indent_level: usize) {
         print!(" ");
     }
     // Print type + value.
-    debug_assert_eq!(NodeType::NODE_TYPE_MAX as i32, 3, "print_node() must handle all node types");
+    debug_assert_eq!(NodeType::NODE_TYPE_MAX as i32, 7, "print_node() must handle all node types");
     match node.type_ {
         NodeType::NODE_TYPE_NONE => print!("NONE"),
         NodeType::NODE_TYPE_INTEGER => print!("INT:{}", node.value.integer),
-        NodeType::NODE_TYPE_PROGRAM => print!("PROGRAM"),
-        NodeType::NODE_TYPE_MAX => {
+        NodeType::NODE_TYPE_SYMBOL => {
+            print!("SYM");
+            if let Some(symbol) = &node.value.symbol {
+                print!(":{}", symbol);
+            }
+        }
+        NodeType::NODE_TYPE_BINARY_OPERATOR => print!("TODO: print_node() BINARY_OPERATOR"),
+        NodeType::NODE_TYPE_VARIABLE_DECLARATION => {
+            print!("VARIABLE DECLARATION");
+            //printf("VAR_DECL:");
+            // TODO: Print first child (ID symbol), then type of second child.
+        }
+        NodeType::NODE_TYPE_VARIABLE_DECLARATION_INITIALIZED => {
+            print!("TODO: print_node() VAR DECL INIT");
+        }
+        NodeType::NODE_TYPE_PROGRAM => {
+            print!("TODO: print_node() PROGRAM");
+        }
+        _ => {
             print!("UNKNOWN");
-            print!("NONE");
         }
     }
     println!();
@@ -325,11 +372,13 @@ fn node_free(root: Option<Box<Node>>) {
     }
     let mut root = root.unwrap();
     let mut child = root.children.take();
-    let mut next_child: Option<Box<Node>> = None;
     while let Some(mut child_node) = child {
-        next_child = child_node.next_child.take();
+        let next_child = child_node.next_child.take();
         node_free(Some(child_node));
         child = next_child;
+    }
+    if symbolp(&root) {
+        root.value.symbol = None;
     }
 }
 
@@ -380,7 +429,7 @@ fn environment_get(env: &Environment, id: Node) -> Node {
         }
         binding_it = binding.next.as_deref();
     }
-    Node::none()
+    Node::zeroed()
 }
 
 // @return Boolean-like value; 1 for success, 0 for failure.
@@ -388,17 +437,23 @@ fn token_string_equalp(string: &str, token: &Token, source: &[u8]) -> i32 {
     let bytes = string.as_bytes();
     let mut i = 0usize;
     let mut beg = token.beginning;
-    while i < bytes.len() && beg < token.end && beg < source.len() {
+    if token.beginning >= token.end {
+        return 1;
+    }
+    if bytes.is_empty() {
+        return 1;
+    }
+    while i < bytes.len() {
+        if beg >= source.len() {
+            return 0;
+        }
         if bytes[i] != source[beg] {
             return 0;
         }
         i += 1;
         beg += 1;
     }
-    if i == bytes.len() && beg == token.end {
-        return 1;
-    }
-    0
+    1
 }
 
 /// @return Boolean-like value; 1 upon success, 0 for failure.
@@ -410,97 +465,132 @@ fn parse_integer(source: &[u8], token: &Token, node: &mut Node) -> i32 {
     if token_slice.len() == 1 && token_slice[0] == b'0' {
         node.type_ = NodeType::NODE_TYPE_INTEGER;
         node.value.integer = 0;
-        return 1;
-    }
-    let mut idx = 0usize;
-    let mut sign: i128 = 1;
-    if token_slice[0] == b'+' || token_slice[0] == b'-' {
-        if token_slice[0] == b'-' {
-            sign = -1;
+    } else if let Ok(token_str) = std::str::from_utf8(token_slice) {
+        if let Ok(value) = token_str.parse::<i64>() {
+            if value == 0 {
+                return 0;
+            }
+            node.type_ = NodeType::NODE_TYPE_INTEGER;
+            node.value.integer = value;
+        } else {
+            return 0;
         }
-        idx = 1;
-    }
-    let start_digits = idx;
-    while idx < token_slice.len() && token_slice[idx].is_ascii_digit() {
-        idx += 1;
-    }
-    if idx == start_digits {
+    } else {
         return 0;
     }
-    let mut value: i128 = 0;
-    for &b in &token_slice[start_digits..idx] {
-        value = value * 10 + (b - b'0') as i128;
-    }
-    value *= sign;
-    let value = if value > i64::MAX as i128 {
-        i64::MAX
-    } else if value < i64::MIN as i128 {
-        i64::MIN
-    } else {
-        value as i64
-    };
-    if value != 0 {
-        node.type_ = NodeType::NODE_TYPE_INTEGER;
-        node.value.integer = value;
-        return 1;
-    }
-    0
+    1
 }
 
-fn parse_expr(source: &[u8], _result: &mut Node) -> Error {
-    let mut token_count: usize = 0;
+fn parse_expr(source: &[u8], end: &mut usize, result: &mut Node) -> Error {
+    let _token_count: usize = 0;
     let mut current_token = Token {
         beginning: 0,
         end: 0,
-        next: None,
     };
-    let mut err = ok();
-
-    let _root = Box::new(Node {
-        type_: NodeType::NODE_TYPE_PROGRAM,
-        value: NodeValue { integer: 0 },
-        children: None,
-        next_child: None,
-    });
+    let mut err;
 
     loop {
         err = lex(source, current_token.end, &mut current_token);
         if err.type_ != ErrorType::ERROR_NONE {
             break;
         }
-        let mut working_node = Node::none();
+
+        *end = current_token.end;
         let token_length = current_token.end.saturating_sub(current_token.beginning);
         if token_length == 0 {
             break;
         }
-        token_count += 1;
-        if parse_integer(source, &current_token, &mut working_node) != 0 {
+        if parse_integer(source, &current_token, result) != 0 {
             // look ahead for binary ops that include integers.
-            let _integer = current_token.clone();
+            let _lhs_integer = (*result).clone();
             err = lex(source, current_token.end, &mut current_token);
             if err.type_ != ErrorType::ERROR_NONE {
                 return err;
             }
+            *end = current_token.end;
+
             // TODO: Check for valid integer operator.
             // It would be cool to use an operator environment to look up
             // operators instead of hard-coding them. This would eventually
             // allow for user-defined operators, or stuff like that!
+
         } else {
-            print!("Unrecognized token: ");
-            print_token(source, &current_token);
-            println!();
+            // TODO: Check for unary prefix operators.
+
+            // TODO: Check that it isn't a binary operator (we should encounter left
+            // side first and peek forward, rather than encounter it at top level).
+
+            let mut symbol = Node::zeroed();
+            symbol.type_ = NodeType::NODE_TYPE_SYMBOL;
+            symbol.children = None;
+            symbol.next_child = None;
+            symbol.value.symbol = None;
+
+            let symbol_string =
+                String::from_utf8_lossy(&source[current_token.beginning..current_token.end])
+                    .to_string();
+            symbol.value.symbol = Some(symbol_string);
+
+            *result = symbol.clone();
 
             // TODO: Check if valid symbol for variable environment, then
             // attempt to pattern match variable access, assignment,
             // declaration, or declaration with initialization.
 
+            err = lex(source, current_token.end, &mut current_token);
+            if err.type_ != ErrorType::ERROR_NONE {
+                return err;
+            }
+            *end = current_token.end;
+            let token_length = current_token.end.saturating_sub(current_token.beginning);
+            if token_length == 0 {
+                break;
+            }
+
+            if token_string_equalp(":", &current_token, source) != 0 {
+                err = lex(source, current_token.end, &mut current_token);
+                if err.type_ != ErrorType::ERROR_NONE {
+                    return err;
+                }
+                *end = current_token.end;
+                let token_length = current_token.end.saturating_sub(current_token.beginning);
+                if token_length == 0 {
+                    break;
+                }
+
+                // TODO: Look up type in types environment from parsing context.
+                if token_string_equalp("integer", &current_token, source) != 0 {
+                    let mut var_decl = Node::zeroed();
+                    var_decl.children = None;
+                    var_decl.next_child = None;
+                    var_decl.type_ = NodeType::NODE_TYPE_VARIABLE_DECLARATION;
+
+                    let mut type_node = Node::zeroed();
+                    type_node.type_ = NodeType::NODE_TYPE_INTEGER;
+
+                    node_add_child(&mut var_decl, &type_node);
+                    node_add_child(&mut var_decl, &symbol);
+
+                    *result = var_decl;
+
+                    // TODO: Look ahead for "=" assignment operator.
+
+                    return ok();
+                }
+            }
+
+            print!("Unrecognized token: ");
+            print_token(source, &current_token);
+            println!();
+
+            return err;
         }
-        print!("Found node: ");
-        print_node(Some(&working_node), 0);
+
+        print!("Intermediate node: ");
+        print_node(Some(&*result), 0);
         println!();
     }
 
-    let _ = token_count;
     err
 }
 
@@ -513,11 +603,24 @@ fn main() {
 
     let path = &args[1];
     let contents = file_contents(path);
+
     if let Some(contents) = contents {
         //printf("Contents of %s:\n---\n\"%s\"\n---\n", path, contents);
 
-        let mut expression = Node::none();
-        let err = parse_expr(&contents, &mut expression);
+        // TODO: Create API to heap allocate a program node, as well as add
+        // expressions as children.
+        let mut expression = Node::zeroed();
+        let mut contents_it = 0usize;
+        let err = parse_expr(&contents, &mut contents_it, &mut expression);
+        print_node(Some(&expression), 0);
+        println!();
+
         print_error(&err);
     }
 }
+
+
+
+
+
+
