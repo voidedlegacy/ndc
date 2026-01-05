@@ -97,7 +97,7 @@ fn print_error(err: &Error) {
         ErrorType::ERROR_ARGUMENTS => print!("Invalid arguments"),
         ErrorType::ERROR_GENERIC => {}
         ErrorType::ERROR_NONE => {}
-        ErrorType::ERROR_MAX => print!("Unkown error type..."),
+        _ => print!("Unkown error type..."),
     }
     println!();
     if let Some(msg) = &err.msg {
@@ -135,13 +135,8 @@ fn print_token(source: &[u8], t: &Token) {
 /// Lex the next token from SOURCE, and point to it with BEG and END.
 fn lex(source: &[u8], start: usize, token: &mut Token) -> Error {
     let mut err = ok();
-    if source.is_empty() {
+    if start > source.len() {
         error_prep(&mut err, ErrorType::ERROR_ARGUMENTS, "Can not lex empty source.");
-        return err;
-    }
-    if start >= source.len() {
-        token.beginning = start;
-        token.end = start;
         return err;
     }
     token.beginning = start;
@@ -290,24 +285,22 @@ fn node_compare(a: Option<&Node>, b: Option<&Node>) -> i32 {
     }
     let a = a.unwrap();
     let b = b.unwrap();
-    debug_assert_eq!(NodeType::NODE_TYPE_MAX as i32, 7, "node_compare() must handle all node types");
+    debug_assert_eq!(NodeType::NODE_TYPE_MAX as i32, 3, "node_compare() must handle all node types");
     if a.type_ != b.type_ {
         return 0;
     }
     match a.type_ {
         NodeType::NODE_TYPE_NONE => {
             if nonep(b) {
-                1
-            } else {
-                0
+                return 1;
             }
+            0
         }
         NodeType::NODE_TYPE_INTEGER => {
             if a.value.integer == b.value.integer {
-                1
-            } else {
-                0
+                return 1;
             }
+            0
         }
         NodeType::NODE_TYPE_PROGRAM => {
             // TODO: Compare two programs.
@@ -329,7 +322,7 @@ fn print_node(node: Option<&Node>, indent_level: usize) {
         print!(" ");
     }
     // Print type + value.
-    debug_assert_eq!(NodeType::NODE_TYPE_MAX as i32, 7, "print_node() must handle all node types");
+    debug_assert_eq!(NodeType::NODE_TYPE_MAX as i32, 3, "print_node() must handle all node types");
     match node.type_ {
         NodeType::NODE_TYPE_NONE => print!("NONE"),
         NodeType::NODE_TYPE_INTEGER => print!("INT:{}", node.value.integer),
@@ -339,21 +332,13 @@ fn print_node(node: Option<&Node>, indent_level: usize) {
                 print!(":{}", symbol);
             }
         }
-        NodeType::NODE_TYPE_BINARY_OPERATOR => print!("TODO: print_node() BINARY_OPERATOR"),
-        NodeType::NODE_TYPE_VARIABLE_DECLARATION => {
-            print!("VARIABLE DECLARATION");
-            //printf("VAR_DECL:");
-            // TODO: Print first child (ID symbol), then type of second child.
-        }
+        NodeType::NODE_TYPE_BINARY_OPERATOR => print!("BINARY OPERATOR"),
+        NodeType::NODE_TYPE_VARIABLE_DECLARATION => print!("VARIABLE DECLARATION"),
         NodeType::NODE_TYPE_VARIABLE_DECLARATION_INITIALIZED => {
-            print!("TODO: print_node() VAR DECL INIT");
+            print!("VARIABLE DECLARATION INITIALIZED");
         }
-        NodeType::NODE_TYPE_PROGRAM => {
-            print!("TODO: print_node() PROGRAM");
-        }
-        _ => {
-            print!("UNKNOWN");
-        }
+        NodeType::NODE_TYPE_PROGRAM => print!("PROGRAM"),
+        _ => print!("UNKNOWN"),
     }
     println!();
     // Print children.
@@ -434,16 +419,13 @@ fn environment_get(env: &Environment, id: Node) -> Node {
 
 // @return Boolean-like value; 1 for success, 0 for failure.
 fn token_string_equalp(string: &str, token: &Token, source: &[u8]) -> i32 {
+    if string.is_empty() {
+        return 1;
+    }
     let bytes = string.as_bytes();
     let mut i = 0usize;
     let mut beg = token.beginning;
-    if token.beginning >= token.end {
-        return 1;
-    }
-    if bytes.is_empty() {
-        return 1;
-    }
-    while i < bytes.len() {
+    while i < bytes.len() && beg < token.end {
         if beg >= source.len() {
             return 0;
         }
@@ -487,14 +469,12 @@ fn parse_expr(source: &[u8], end: &mut usize, result: &mut Node) -> Error {
         beginning: 0,
         end: 0,
     };
-    let mut err;
+    let mut err = ok();
 
-    loop {
+    while {
         err = lex(source, current_token.end, &mut current_token);
-        if err.type_ != ErrorType::ERROR_NONE {
-            break;
-        }
-
+        err.type_ == ErrorType::ERROR_NONE
+    } {
         *end = current_token.end;
         let token_length = current_token.end.saturating_sub(current_token.beginning);
         if token_length == 0 {
@@ -618,9 +598,3 @@ fn main() {
         print_error(&err);
     }
 }
-
-
-
-
-
-
