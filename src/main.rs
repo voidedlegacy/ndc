@@ -58,6 +58,7 @@ fn print_usage(argv0: &str) {
     println!("USAGE: {} <path_to_file_to_compile>", argv0);
 }
 
+// TODO: Add file path, byte offset, etc.
 #[allow(non_camel_case_types)]
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,18 +98,11 @@ fn print_error(err: &Error) {
         ErrorType::ERROR_ARGUMENTS => print!("Invalid arguments"),
         ErrorType::ERROR_GENERIC => {}
         ErrorType::ERROR_NONE => {}
-        ErrorType::ERROR_MAX => print!("Unkown error type..."),
+        _ => print!("Unkown error type..."),
     }
     println!();
     if let Some(msg) = &err.msg {
         println!("     : {}", msg);
-    }
-}
-
-fn error_create(kind: ErrorType, msg: &str) -> Error {
-    Error {
-        type_: kind,
-        msg: Some(msg.to_string()),
     }
 }
 
@@ -135,13 +129,8 @@ fn print_token(source: &[u8], t: &Token) {
 /// Lex the next token from SOURCE, and point to it with BEG and END.
 fn lex(source: &[u8], start: usize, token: &mut Token) -> Error {
     let mut err = ok();
-    if source.is_empty() {
+    if start > source.len() {
         error_prep(&mut err, ErrorType::ERROR_ARGUMENTS, "Can not lex empty source.");
-        return err;
-    }
-    if start >= source.len() {
-        token.beginning = start;
-        token.end = start;
         return err;
     }
     token.beginning = start;
@@ -238,18 +227,16 @@ struct Node {
     next_child: Option<Box<Node>>,
 }
 
-impl Node {
-    fn zeroed() -> Self {
-        Node {
-            type_: NodeType::NODE_TYPE_NONE,
-            value: NodeValue {
-                integer: 0,
-                symbol: None,
-            },
-            children: None,
-            next_child: None,
-        }
-    }
+fn node_allocate() -> Box<Node> {
+    Box::new(Node {
+        type_: NodeType::NODE_TYPE_NONE,
+        value: NodeValue {
+            integer: 0,
+            symbol: None,
+        },
+        children: None,
+        next_child: None,
+    })
 }
 
 fn nonep(node: &Node) -> bool {
@@ -264,19 +251,20 @@ fn symbolp(node: &Node) -> bool {
     node.type_ == NodeType::NODE_TYPE_SYMBOL
 }
 
-fn node_add_child(parent: &mut Node, new_child: &Node) {
-    let allocated_child = Box::new(new_child.clone());
-    let mut cursor = &mut parent.children;
-    loop {
-        match cursor {
-            Some(child) => {
-                cursor = &mut child.next_child;
-            }
-            None => {
-                *cursor = Some(allocated_child);
-                break;
-            }
+/// PARENT is modified, NEW_CHILD pointer is used verbatim.
+fn node_add_child(parent: &mut Node, new_child: Box<Node>) {
+    if parent.children.is_none() {
+        parent.children = Some(new_child);
+        return;
+    }
+
+    let mut cursor = parent.children.as_mut();
+    while let Some(child) = cursor {
+        if child.next_child.is_none() {
+            child.next_child = Some(new_child);
+            return;
         }
+        cursor = child.next_child.as_mut();
     }
 }
 
@@ -290,6 +278,7 @@ fn node_compare(a: Option<&Node>, b: Option<&Node>) -> i32 {
     }
     let a = a.unwrap();
     let b = b.unwrap();
+    // TODO: This assert doesn't work, I don't know why :^(.
     debug_assert_eq!(NodeType::NODE_TYPE_MAX as i32, 7, "node_compare() must handle all node types");
     if a.type_ != b.type_ {
         return 0;
@@ -297,25 +286,74 @@ fn node_compare(a: Option<&Node>, b: Option<&Node>) -> i32 {
     match a.type_ {
         NodeType::NODE_TYPE_NONE => {
             if nonep(b) {
-                1
-            } else {
-                0
+                return 1;
             }
+            0
         }
         NodeType::NODE_TYPE_INTEGER => {
             if a.value.integer == b.value.integer {
-                1
-            } else {
-                0
+                return 1;
             }
+            0
+        }
+        NodeType::NODE_TYPE_SYMBOL => {
+            match (&a.value.symbol, &b.value.symbol) {
+                (Some(left), Some(right)) => {
+                    if left == right {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                (None, None) => 1,
+                _ => 0,
+            }
+        }
+        NodeType::NODE_TYPE_BINARY_OPERATOR => {
+            println!("TODO: node_compare() BINARY OPERATOR");
+            0
+        }
+        NodeType::NODE_TYPE_VARIABLE_DECLARATION => {
+            println!("TODO: node_compare() VARIABLE DECLARATION");
+            0
+        }
+        NodeType::NODE_TYPE_VARIABLE_DECLARATION_INITIALIZED => {
+            println!("TODO: node_compare() VARIABLE DECLARATION INITIALIZED");
+            0
         }
         NodeType::NODE_TYPE_PROGRAM => {
             // TODO: Compare two programs.
             println!("TODO: Compare two programs.");
             0
         }
-        _ => 0,
+        NodeType::NODE_TYPE_MAX => 0,
     }
+}
+
+fn node_integer(value: i64) -> Box<Node> {
+    let mut integer = node_allocate();
+    integer.type_ = NodeType::NODE_TYPE_INTEGER;
+    integer.value.integer = value;
+    integer.children = None;
+    integer.next_child = None;
+    integer
+}
+
+// TODO: Think about caching used symbols and not creating duplicates!
+fn node_symbol(symbol_string: &str) -> Box<Node> {
+    let mut symbol = node_allocate();
+    symbol.type_ = NodeType::NODE_TYPE_SYMBOL;
+    symbol.value.symbol = Some(symbol_string.to_string());
+    symbol
+}
+
+fn node_symbol_from_buffer(buffer: &[u8]) -> Box<Node> {
+    assert!(!buffer.is_empty(), "Can not create AST symbol node from NULL buffer");
+    let symbol_string = String::from_utf8_lossy(buffer).to_string();
+    let mut symbol = node_allocate();
+    symbol.type_ = NodeType::NODE_TYPE_SYMBOL;
+    symbol.value.symbol = Some(symbol_string);
+    symbol
 }
 
 fn print_node(node: Option<&Node>, indent_level: usize) {
@@ -339,21 +377,13 @@ fn print_node(node: Option<&Node>, indent_level: usize) {
                 print!(":{}", symbol);
             }
         }
-        NodeType::NODE_TYPE_BINARY_OPERATOR => print!("TODO: print_node() BINARY_OPERATOR"),
-        NodeType::NODE_TYPE_VARIABLE_DECLARATION => {
-            print!("VARIABLE DECLARATION");
-            //printf("VAR_DECL:");
-            // TODO: Print first child (ID symbol), then type of second child.
-        }
+        NodeType::NODE_TYPE_BINARY_OPERATOR => print!("BINARY OPERATOR"),
+        NodeType::NODE_TYPE_VARIABLE_DECLARATION => print!("VARIABLE DECLARATION"),
         NodeType::NODE_TYPE_VARIABLE_DECLARATION_INITIALIZED => {
-            print!("TODO: print_node() VAR DECL INIT");
+            print!("VARIABLE DECLARATION INITIALIZED");
         }
-        NodeType::NODE_TYPE_PROGRAM => {
-            print!("TODO: print_node() PROGRAM");
-        }
-        _ => {
-            print!("UNKNOWN");
-        }
+        NodeType::NODE_TYPE_PROGRAM => print!("PROGRAM"),
+        _ => print!("UNKNOWN"),
     }
     println!();
     // Print children.
@@ -364,8 +394,6 @@ fn print_node(node: Option<&Node>, indent_level: usize) {
     }
 }
 
-// TODO: Make more efficient! m_n_t_r_a on Twitch suggests keeping track
-// of allocated pointers and then freeing all in one go.
 fn node_free(root: Option<Box<Node>>) {
     if root.is_none() {
         return;
@@ -386,8 +414,8 @@ fn node_free(root: Option<Box<Node>>) {
 // |-- API to create new Binding.
 // `-- API to add Binding to environment.
 struct Binding {
-    id: Node,
-    value: Node,
+    id: Box<Node>,
+    value: Box<Node>,
     next: Option<Box<Binding>>,
 }
 
@@ -401,13 +429,21 @@ fn environment_create(parent: Option<Box<Environment>>) -> Box<Environment> {
     Box::new(Environment { parent, bind: None })
 }
 
-fn environment_set(env: &mut Environment, id: Node, value: Node) {
+/**
+ * @retval 0 Failure.
+ * @retval 1 Creation of new binding.
+ * @retval 2 Existing binding value overwrite (ID unused).
+ */
+fn environment_set(env: &mut Environment, id: Box<Node>, value: Box<Node>) -> i32 {
     // Over-write existing value if ID is already bound in environment.
+    if id.type_ == NodeType::NODE_TYPE_NONE && value.type_ == NodeType::NODE_TYPE_NONE {
+        return 0;
+    }
     let mut binding_it = env.bind.as_deref_mut();
     while let Some(binding) = binding_it {
         if node_compare(Some(&binding.id), Some(&id)) != 0 {
             binding.value = value;
-            return;
+            return 2;
         }
         binding_it = binding.next.as_deref_mut();
     }
@@ -419,31 +455,37 @@ fn environment_set(env: &mut Environment, id: Node, value: Node) {
     });
     binding.next = env.bind.take();
     env.bind = Some(binding);
+    1
 }
 
-fn environment_get(env: &Environment, id: Node) -> Node {
+/// @return Boolean-like value; 1 for success, 0 for failure.
+fn environment_get(env: &Environment, id: &Node, result: &mut Node) -> i32 {
     let mut binding_it = env.bind.as_deref();
     while let Some(binding) = binding_it {
-        if node_compare(Some(&binding.id), Some(&id)) != 0 {
-            return binding.value.clone();
+        if node_compare(Some(&binding.id), Some(id)) != 0 {
+            *result = (*binding.value).clone();
+            return 1;
         }
         binding_it = binding.next.as_deref();
     }
-    Node::zeroed()
+    0
+}
+
+fn environment_get_by_symbol(env: &Environment, symbol: &str, result: &mut Node) -> i32 {
+    let symbol_node = node_symbol(symbol);
+    let status = environment_get(env, &symbol_node, result);
+    status
 }
 
 // @return Boolean-like value; 1 for success, 0 for failure.
 fn token_string_equalp(string: &str, token: &Token, source: &[u8]) -> i32 {
+    if string.is_empty() {
+        return 1;
+    }
     let bytes = string.as_bytes();
     let mut i = 0usize;
     let mut beg = token.beginning;
-    if token.beginning >= token.end {
-        return 1;
-    }
-    if bytes.is_empty() {
-        return 1;
-    }
-    while i < bytes.len() {
+    while i < bytes.len() && beg < token.end {
         if beg >= source.len() {
             return 0;
         }
@@ -481,7 +523,31 @@ fn parse_integer(source: &[u8], token: &Token, node: &mut Node) -> i32 {
     1
 }
 
-fn parse_expr(source: &[u8], end: &mut usize, result: &mut Node) -> Error {
+type ParsingContext = ParsingContextStruct;
+
+struct ParsingContextStruct {
+    // FIXME: "struct ParsingContext *parent;" ???
+    types: Box<Environment>,
+    variables: Box<Environment>,
+}
+
+fn parse_context_create() -> Box<ParsingContextStruct> {
+    let mut ctx = Box::new(ParsingContextStruct {
+        types: environment_create(None),
+        variables: environment_create(None),
+    });
+    if environment_set(&mut ctx.types, node_symbol("integer"), node_integer(0)) == 0 {
+        println!("ERROR: Failed to set builtin type in types environment.");
+    }
+    ctx
+}
+
+fn parse_expr(
+    context: &mut ParsingContext,
+    source: &[u8],
+    end: &mut usize,
+    result: &mut Node,
+) -> Error {
     let _token_count: usize = 0;
     let mut current_token = Token {
         beginning: 0,
@@ -494,7 +560,6 @@ fn parse_expr(source: &[u8], end: &mut usize, result: &mut Node) -> Error {
         if err.type_ != ErrorType::ERROR_NONE {
             break;
         }
-
         *end = current_token.end;
         let token_length = current_token.end.saturating_sub(current_token.beginning);
         if token_length == 0 {
@@ -520,18 +585,11 @@ fn parse_expr(source: &[u8], end: &mut usize, result: &mut Node) -> Error {
             // TODO: Check that it isn't a binary operator (we should encounter left
             // side first and peek forward, rather than encounter it at top level).
 
-            let mut symbol = Node::zeroed();
-            symbol.type_ = NodeType::NODE_TYPE_SYMBOL;
-            symbol.children = None;
-            symbol.next_child = None;
-            symbol.value.symbol = None;
+            let symbol = node_symbol_from_buffer(
+                &source[current_token.beginning..current_token.beginning + token_length],
+            );
 
-            let symbol_string =
-                String::from_utf8_lossy(&source[current_token.beginning..current_token.end])
-                    .to_string();
-            symbol.value.symbol = Some(symbol_string);
-
-            *result = symbol.clone();
+            //*result = *symbol;
 
             // TODO: Check if valid symbol for variable environment, then
             // attempt to pattern match variable access, assignment,
@@ -558,22 +616,36 @@ fn parse_expr(source: &[u8], end: &mut usize, result: &mut Node) -> Error {
                     break;
                 }
 
-                // TODO: Look up type in types environment from parsing context.
-                if token_string_equalp("integer", &current_token, source) != 0 {
-                    let mut var_decl = Node::zeroed();
-                    var_decl.children = None;
-                    var_decl.next_child = None;
+                let expected_type_symbol = node_symbol_from_buffer(
+                    &source[current_token.beginning..current_token.beginning + token_length],
+                );
+                let status = environment_get(&context.types, &expected_type_symbol, result);
+                if status == 0 {
+                    error_prep(
+                        &mut err,
+                        ErrorType::ERROR_TYPE,
+                        "Invalid type within variable declaration",
+                    );
+                    println!(
+                        "\nINVALID TYPE: \"{}\"",
+                        expected_type_symbol.value.symbol.as_deref().unwrap_or("")
+                    );
+                    return err;
+                } else {
+                    //printf("Found valid type: ");
+                    //print_node(expected_type_symbol,0);
+                    //putchar('\n');
+
+                    let mut var_decl = node_allocate();
                     var_decl.type_ = NodeType::NODE_TYPE_VARIABLE_DECLARATION;
 
-                    let mut type_node = Node::zeroed();
-                    type_node.type_ = NodeType::NODE_TYPE_INTEGER;
+                    let mut type_node = node_allocate();
+                    type_node.type_ = result.type_;
 
-                    node_add_child(&mut var_decl, &type_node);
-                    node_add_child(&mut var_decl, &symbol);
+                    node_add_child(&mut var_decl, type_node);
+                    node_add_child(&mut var_decl, symbol);
 
-                    *result = var_decl;
-
-                    // TODO: Look ahead for "=" assignment operator.
+                    *result = (*var_decl).clone();
 
                     return ok();
                 }
@@ -609,12 +681,28 @@ fn main() {
 
         // TODO: Create API to heap allocate a program node, as well as add
         // expressions as children.
-        let mut expression = Node::zeroed();
+        let mut context = parse_context_create();
+        let mut program = node_allocate();
+        program.type_ = NodeType::NODE_TYPE_PROGRAM;
+        let mut expression = node_allocate();
+        *expression = Node {
+            type_: NodeType::NODE_TYPE_NONE,
+            value: NodeValue {
+                integer: 0,
+                symbol: None,
+            },
+            children: None,
+            next_child: None,
+        };
         let mut contents_it = 0usize;
-        let err = parse_expr(&contents, &mut contents_it, &mut expression);
-        print_node(Some(&expression), 0);
-        println!();
+        let err = parse_expr(&mut context, &contents, &mut contents_it, &mut expression);
+        node_add_child(&mut program, expression);
 
         print_error(&err);
+
+        print_node(Some(&program), 0);
+        println!();
+
+        node_free(Some(program));
     }
 }
